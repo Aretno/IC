@@ -1,7 +1,8 @@
 import numpy  as np
 import invisible_cities.reco.corrections    as corrf
+import numba
 
-
+@numba.jit
 def CreateVoxels(DataSiPM, sens_id, sens_q, point_dist, sipm_thr, sizeX, sizeY):
     voxX = []
     voxY = []
@@ -15,6 +16,7 @@ def CreateVoxels(DataSiPM, sens_id, sens_q, point_dist, sipm_thr, sizeX, sizeY):
             voxE.append(sens_q.mean())
     return np.array([np.array(voxX), np.array(voxY), np.array(voxE)])
 
+@numba.jit
 def CreateSiPMresponse(DataSiPM, sens_id, sens_q, sipm_dist, sipm_thr, vox):
     sens_response = []
     selDB = (DataSiPM.X >= vox[0].min()-sipm_dist) & (DataSiPM.X <= vox[0].max()+sipm_dist) 
@@ -27,6 +29,7 @@ def CreateSiPMresponse(DataSiPM, sens_id, sens_q, sipm_dist, sipm_thr, vox):
             sens_response.append([ID,0.])
     return np.array(sens_response)
 
+@numba.jit
 def ComputeAnodeForward(DataSiPM, vox, anode_response, sipm_dist, sipm_xy_map):
     anodeForward = []
     for sensor in anode_response:
@@ -36,20 +39,24 @@ def ComputeAnodeForward(DataSiPM, vox, anode_response, sipm_dist, sipm_xy_map):
         anodeForward.append(np.sum(vox[2][selVox]*(1./sipm_xy_map(voxDX, voxDY).value)))
     return np.array(anodeForward)
 
+@numba.jit
 def ComputeCathForward(vox, cath_response, pmt_xy_map):
     cathForward = []
     for sensor in range(len(cath_response)):
         cathForward.append(np.sum(vox[2]*(1./pmt_xy_map[sensor](vox[0], vox[1]).value)))
     return np.array(cathForward)
 
+@numba.jit
 def MLEM_step(DataSiPM, oldVox, anode_response, cath_response, pmt_xy_map, sipm_xy_map, sipm_dist=20., eThres=0., fCathode = True, fAnode = True):
     newVoxE = []
     newVoxX = []
     newVoxY = []
+    
     if fAnode:
         anodeForward = ComputeAnodeForward(DataSiPM, oldVox, anode_response, sipm_dist, sipm_xy_map)    
     if fCathode:
         cathForward = ComputeCathForward(oldVox, cath_response, pmt_xy_map)
+        
     for j in range(len(oldVox[0])):
         efficiency = 0
         anWeight = 0
@@ -63,15 +70,23 @@ def MLEM_step(DataSiPM, oldVox, anode_response, cath_response, pmt_xy_map, sipm_
             anWeight += np.sum(anode_response[selV,1]*(1./sipm_xy_map(voxDX[selV], voxDY[selV]).value)/anodeForward[selV])
             efficiency += np.sum(1./sipm_xy_map(voxDX[selV], voxDY[selV]).value)
         if fCathode:
-            pmtCorr = [1./pmt_xy_map[i](oldVox[0][j],oldVox[1][j]).value for i in range(len(cath_response))]
+            pmtCorr = pmtCorrections(j, oldVox, pmt_xy_map, len(cath_response))
             cathWeight += np.sum(cath_response*pmtCorr/cathForward)
             efficiency += np.sum(pmtCorr)
-    
+
         newValue = oldVox[2][j]*(anWeight+cathWeight)/efficiency
 
         if(newValue > eThres):
             newVoxE.append(newValue)
             newVoxX.append(oldVox[0][j])
             newVoxY.append(oldVox[1][j])
-            
-    return np.array([np.array(newVoxX), np.array(newVoxY), np.array(newVoxE)])
+
+    return np.array(newVoxX, newVoxY, newVoxE)
+
+@numba.jit
+def pmtCorrections(j, oldVox, pmt_xy_map, n_pmts):
+    pmtcorrection = np.zeros(n_pmts)
+    for i in range(n_pmts):
+        pmtcorrection[i] = 1./pmt_xy_map[i](oldVox[0][j],oldVox[1][j]).value
+    return pmtcorrection
+        
