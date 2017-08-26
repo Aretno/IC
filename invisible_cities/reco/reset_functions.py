@@ -22,8 +22,8 @@ def CreateVoxels(DataSiPM, sens_id, sens_q, point_dist, sipm_thr, sizeX, sizeY, 
 
 def CreateSiPMresponse(DataSiPM, sens_id, sens_q, sipm_dist, sipm_thr, vox):
     sens_response = []
-    selDB = (DataSiPM.X >= vox[0].min()-sipm_dist) & (DataSiPM.X <= vox[0].max()+sipm_dist) 
-    selDB = selDB & (DataSiPM.Y >= vox[1].min()-sipm_dist) & (DataSiPM.Y <= vox[1].max()+sipm_dist) 
+    selDB = (DataSiPM.X.values >= vox[0].min()-sipm_dist) & (DataSiPM.X.values <= vox[0].max()+sipm_dist) 
+    selDB = selDB & (DataSiPM.Y.values >= vox[1].min()-sipm_dist) & (DataSiPM.Y.values <= vox[1].max()+sipm_dist) 
     for ID in DataSiPM[selDB].index.values:
         sel = (sens_id==ID)
         if sens_q[sel] > sipm_thr:
@@ -35,18 +35,16 @@ def CreateSiPMresponse(DataSiPM, sens_id, sens_q, sipm_dist, sipm_thr, vox):
 def ComputeCathForward(vox, cath_response, pmt_xy_map):
     cathForward = []
     for sensor in range(len(cath_response)):
-        cathForward.append(sum(vox[2]*(1./pmt_xy_map[sensor](vox[0], vox[1]).value)))
+        cathForward.append(np.sum(vox[2]*(1./pmt_xy_map[sensor](vox[0], vox[1]).value)))
     return np.array(cathForward)
 
-@numba.jit
-def pmtCorrections(j, oldVox, pmt_xy_map, n_pmts):
-    pmtcorrection = np.zeros(n_pmts)
-    for i in range(n_pmts):
-        pmtcorrection[i] = 1./pmt_xy_map[i](oldVox[0][j],oldVox[1][j]).value
-    return pmtcorrection
+def ComputeCathForward2(vox, cath_response, pmt_prob):
+    cathForward = []
+    for sensor in range(len(cath_response)):
+        cathForward.append(np.sum(vox[2]*(pmt_prob[:,sensor])))
+    return np.array(cathForward)
         
-@numba.jit
-def MLEM_step2(voxDX, voxDY, oldVox, selVox, selSens, anode_response, cath_response, pmt_xy_map, xy_prob, sipm_dist=20., eThres=0., fCathode = True, fAnode = True):
+def MLEM_step2(voxDX, voxDY, oldVox, selVox, selSens, anode_response, cath_response, pmt_prob, xy_prob, sipm_dist=20., eThres=0., fCathode = True, fAnode = True):
     newVoxE = []
     newVoxX = []
     newVoxY = []
@@ -57,39 +55,46 @@ def MLEM_step2(voxDX, voxDY, oldVox, selVox, selSens, anode_response, cath_respo
     if fAnode:
         anodeForward = ComputeAnodeForward2(voxDX, voxDY, oldVox, anode_response, sipm_dist, xy_prob, selVox)    
     if fCathode:
-        cathForward = ComputeCathForward(oldVox, cath_response, pmt_xy_map)
-        
+        cathForward = ComputeCathForward2(oldVox, cath_response, pmt_prob)
     for j in range(len(oldVox[0])):
+        if oldVox[2][j] <= 0:
+            newVoxE.append(0.)
+            newVoxX.append(oldVox[0,j])
+            newVoxY.append(oldVox[1,j])
+            continue
+
         efficiency = 0
         anWeight = 0
         cathWeight = 0
 
         if fAnode:
-            selS = selSens[j] #(np.abs(voxDX[j]) <= sipm_dist) & (np.abs(voxDY[j]) <= sipm_dist)
-            if sum(anode_response[selS,1]) == 0.:
+            selS = selSens[j]
+            if np.sum(anode_response[selS,1]) == 0.:
                 newVoxE.append(0.)
-                newVoxX.append(oldVox[0][j])
-                newVoxY.append(oldVox[1][j])
+                newVoxX.append(oldVox[0,j])
+                newVoxY.append(oldVox[1,j])
                 continue
-            sipmCorr = xy_prob[j][selS]#1./sipm_xy_map(voxDX[j][selV], voxDY[j][selV]).value
-            anWeight += sum(anode_response[selS,1]*(sipmCorr)/anodeForward[selS])
-            efficiency += sum(sipmCorr)
+            sipmCorr = xy_prob[j]
+            anWeight += np.sum( (anode_response[:,1]*sipmCorr/anodeForward)[selS] )
+            efficiency += np.sum(sipmCorr[selS])
         if fCathode:
-            pmtCorr = pmtCorrections(j, oldVox, pmt_xy_map, len(cath_response))
-            cathWeight += sum(cath_response*pmtCorr/cathForward)
-            efficiency += sum(pmtCorr)
+            pmtCorr = pmt_prob[j]
+            cathWeight += np.sum(cath_response*pmtCorr/cathForward)
+            efficiency += np.sum(pmtCorr)
             
         newValue = oldVox[2][j]*(anWeight+cathWeight)/efficiency
 
         if(newValue >= eThres):
             newVoxE.append(newValue)
-            newVoxX.append(oldVox[0][j])
-            newVoxY.append(oldVox[1][j])
+            newVoxX.append(oldVox[0,j])
+            newVoxY.append(oldVox[1,j])
 
     return np.array([newVoxX, newVoxY, newVoxE])
 
 def computeDiff(DataSiPM, oldVox, anode_response):
-    voxD = np.array([[oldVox[0][j] - DataSiPM.X[anode_response[:,0]].values, oldVox[1][j] - DataSiPM.Y[anode_response[:,0]].values] for j in range(len(oldVox[0]))])
+    sensx = DataSiPM.X[anode_response[:,0]].values
+    sensy =  DataSiPM.Y[anode_response[:,0]].values
+    voxD = np.array([[oldVox[0][j] - sensx, oldVox[1][j] - sensy] for j in range(len(oldVox[0]))])
     return voxD[:,0], voxD[:,1]
 
 @numba.autojit
@@ -98,14 +103,15 @@ def ComputeAnodeForward2(voxDX, voxDY, vox, anode_response, sipm_dist, xy_prob, 
     anodeForward = np.zeros(dim)
     for sensor in range(dim):
         selV = selVox[sensor]
-        #        selVox = (np.abs(voxDX[:,sensor]) <= sipm_dist) & (np.abs(voxDY[:,sensor]) <= sipm_dist)
-        anodeForward[sensor] = (sum(vox[2][selV]*xy_prob[selV,sensor]))
+        anodeForward[sensor] = (np.sum(vox[2][selV]*xy_prob[selV,sensor]))
     return anodeForward
 
-def computeProb(sipm_xy_map, voxDX, voxDY):
+def computeProb(pmt_xy_map, sipm_xy_map, voxDX, voxDY, voxX, voxY):
     xyprob = [1./sipm_xy_map(voxDX[j], voxDY[j]).value for j in range(len(voxDX))]
-    return np.array(xyprob)
+    pmtprob = [1./pmt_xy_map[i](voxX[j], voxY[j]).value for i in range(len(pmt_xy_map)) for j in range(len(voxDX))]
+    return np.array(xyprob), np.array(pmtprob)
 
+@numba.autojit
 def createSel(voxDX, voxDY, anode_response, sipm_dist):
     selVox = []
     selSens = []
@@ -113,7 +119,7 @@ def createSel(voxDX, voxDY, anode_response, sipm_dist):
         selVox.append( (np.abs(voxDX[:,sensor]) <= sipm_dist) & (np.abs(voxDY[:,sensor]) <= sipm_dist) )
     for voxel in range(len(voxDX)):
         selSens.append( (np.abs(voxDX[voxel]) <= sipm_dist) & (np.abs(voxDY[voxel]) <= sipm_dist) )
-    return selVox, selSens
+    return np.array(selVox), np.array(selSens)
 
 def MLEM_step(voxDX, voxDY, oldVox, anode_response, cath_response, pmt_xy_map, sipm_xy_map, sipm_dist=20., eThres=0., fCathode = True, fAnode = True):
     newVoxE = []
@@ -132,18 +138,18 @@ def MLEM_step(voxDX, voxDY, oldVox, anode_response, cath_response, pmt_xy_map, s
 
         if fAnode:
             selV = (np.abs(voxDX[j]) <= sipm_dist) & (np.abs(voxDY[j]) <= sipm_dist)
-            if sum(anode_response[selV,1]) == 0.:
+            if np.sum(anode_response[selV,1]) == 0.:
                 newVoxE.append(0.)
                 newVoxX.append(oldVox[0][j])
                 newVoxY.append(oldVox[1][j])
                 continue
             sipmCorr = 1./sipm_xy_map(voxDX[j][selV], voxDY[j][selV]).value
-            anWeight += sum(anode_response[selV,1]*(sipmCorr)/anodeForward[selV])
-            efficiency += sum(sipmCorr)
+            anWeight += np.sum(anode_response[selV,1]*(sipmCorr)/anodeForward[selV])
+            efficiency += np.sum(sipmCorr)
         if fCathode:
-            pmtCorr = pmtCorrections(j, oldVox, pmt_xy_map, len(cath_response))
-            cathWeight += sum(cath_response*pmtCorr/cathForward)
-            efficiency += sum(pmtCorr)
+            pmtCorr = 0#pmtCorrections(j, oldVox, pmt_xy_map, len(cath_response))
+            cathWeight += np.sum(cath_response*pmtCorr/cathForward)
+            efficiency += np.sum(pmtCorr)
             
         newValue = oldVox[2][j]*(anWeight+cathWeight)/efficiency
 
@@ -158,6 +164,6 @@ def ComputeAnodeForward(voxDX, voxDY, vox, anode_response, sipm_dist, sipm_xy_ma
     anodeForward = []
     for sensor in range(len(anode_response)):
         selVox = (np.abs(voxDX[:,sensor]) <= sipm_dist) & (np.abs(voxDY[:,sensor]) <= sipm_dist)
-        anodeForward.append(sum(vox[2][selVox]*(1./sipm_xy_map(voxDX[selVox,sensor], voxDY[selVox,sensor]).value)))
+        anodeForward.append(np.sum(vox[2][selVox]*(1./sipm_xy_map(voxDX[selVox,sensor], voxDY[selVox,sensor]).value)))
     return np.array(anodeForward)
 
